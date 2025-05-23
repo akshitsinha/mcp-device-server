@@ -1,73 +1,160 @@
 from typing import Dict, List, Any
 from fastmcp import FastMCP
+from typing import Annotated
+from pydantic import Field
+import subprocess
+import re
+import tempfile
 
 
 class Printer:
-    def __init__(self, device_id: str, name: str):
-        self.device_id = device_id
-        self.name = name
+    def __init__(self, printer_name: str):
+        self.printer_name = printer_name
 
 
 def register_tools(app: FastMCP) -> None:
     @app.tool(
-        name="list_printers", description="List all printers available on the system"
+        description="List all printers available on the system",
+        tags=["printer"],
     )
     async def list_printers() -> List[Dict[str, str]]:
-        printers = [
-            {"device_id": "printer0", "name": "HP LaserJet Pro"},
-            {"device_id": "printer1", "name": "EPSON WorkForce"},
-        ]
+        try:
+            result = subprocess.run(
+                ["lpstat", "-p"], capture_output=True, text=True, check=True
+            )
+            printer_lines = result.stdout.strip().split("\n")
+
+            printers = []
+            for line in printer_lines:
+                if line.startswith("printer ") and "enabled" in line:
+                    match = re.match(r"printer (\S+)", line)
+                    if match:
+                        printer_name = match.group(1)
+                        printer = Printer(printer_name=printer_name)
+                        printers.append({"printer_name": printer.name})
+        except subprocess.CalledProcessError:
+            printers = []
         return printers
 
     @app.tool(
-        name="get_printer_status",
-        description="Get detailed status information about a printer",
+        name="print_file",
+        description="Print a file using a specified printer",
+        tags=["printer"],
     )
-    async def get_printer_status(device_id: str) -> Dict[str, Any]:
-        return {
-            "device_id": device_id,
-            "name": f"Printer {device_id}",
-            "state": "idle",
-            "jobs_queued": 0,
-            "ink_levels": {
-                "black": "75%",
-                "cyan": "80%",
-                "magenta": "65%",
-                "yellow": "90%",
-            },
-        }
-
-    @app.tool(name="print_file", description="Print a file using a specified printer")
     async def print_file(
-        device_id: str,
-        file_path: str,
-        copies: int = 1,
-        double_sided: bool = False,
-        color: bool = True,
+        file_data: Annotated[
+            bytes, Field(description="Binary data of the file to be printed")
+        ],
+        file_format: Annotated[
+            str, Field(description="File format of the file to be printed")
+        ],
+        printer_name: Annotated[
+            str, Field(description="Name of the printer to use")
+        ] = None,
+        copies: Annotated[
+            int, Field(description="Number of copies to print", ge=1)
+        ] = 1,
+        double_sided: Annotated[bool, Field(description="Print double-sided")] = False,
+        color: Annotated[bool, Field(description="Print in color")] = False,
     ) -> Dict[str, Any]:
-        return {
-            "success": True,
-            "job_id": "job123456",
-            "printer": device_id,
-            "file": file_path,
-            "copies": copies,
-            "double_sided": double_sided,
-            "color": color,
-            "status": "printing",
-            "pages": 5,
-        }
+        if printer_name is None:
+            try:
+                result = subprocess.run(
+                    ["lpstat", "-d"], capture_output=True, text=True, check=True
+                )
+                match = re.search(r"system default destination: (\S+)", result.stdout)
+                if match:
+                    printer_name = match.group(1)
+                else:
+                    return {"success": False, "error": "No default printer found"}
+            except subprocess.CalledProcessError:
+                return {"success": False, "error": "Failed to retrieve default printer"}
 
-    @app.tool(name="get_print_job", description="Get information about a print job")
+        with tempfile.TemporaryFile(
+            delete=False, suffix=f".{file_format}"
+        ) as temp_file:
+            temp_file.write(file_data)
+            file_path = temp_file.name
+
+            try:
+                lp_command = ["lp", "-d", printer_name, "-n", str(copies)]
+                if double_sided:
+                    lp_command.append("-o")
+                    lp_command.append("sides=two-sided-long-edge")
+                if not color:
+                    lp_command.append("-o")
+                    lp_command.append("ColorModel=Gray")
+                lp_command.append(file_path)
+
+                result = subprocess.run(
+                    lp_command, capture_output=True, text=True, check=True
+                )
+                job_id_match = re.search(r"request id is (\S+)", result.stdout)
+                if job_id_match:
+                    job_id = job_id_match.group(1)
+                    return {"success": True, "job_id": job_id, "printer": printer_name}
+                else:
+                    return {
+                        "success": False,
+                        "error": "Failed to retrieve print job ID",
+                    }
+            except subprocess.CalledProcessError as e:
+                return {"success": False, "error": f"Printing failed: {e.stderr}"}
+            finally:
+                temp_file.close()
+
+    @app.tool(
+        name="get_print_job",
+        description="Get information about a print job",
+        tags=["printer"],
+    )
     async def get_print_job(job_id: str) -> Dict[str, Any]:
-        return {
-            "job_id": job_id,
-            "printer": "printer0",
-            "status": "printing",
-            "progress": "60%",
-            "pages_printed": 3,
-            "total_pages": 5,
-        }
+        try:
+            result = subprocess.run(
+                ["lpstat", "-W", "not-completed", "-o", job_id],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if result.stdout.strip():
+                job_info = result.stdout.strip()
+                match = re.search(r"(\S+)\s+\S+\s+(\d+)\s+(\d+)", job_info)
+                if match:
+                    printer_name = match.group(1)
+                    pages_printed = int(match.group(2))
+                    total_pages = int(match.group(3))
+                    return {
+                        "job_id": job_id,
+                        "printer": printer_name,
+                        "status": "printing",
+                        "progress": f"{(pages_printed / total_pages) * 100:.2f}%",
+                        "pages_printed": pages_printed,
+                        "total_pages": total_pages,
+                    }
+                else:
+                    return {"success": False, "error": "Failed to parse job details"}
+            else:
+                return {"success": False, "error": "No such job found"}
+        except subprocess.CalledProcessError as e:
+            return {
+                "success": False,
+                "error": f"Failed to retrieve job info: {e.stderr}",
+            }
 
-    @app.tool(name="cancel_print_job", description="Cancel a print job")
+    @app.tool(
+        name="cancel_print_job", description="Cancel a print job", tags=["printer"]
+    )
     async def cancel_print_job(job_id: str) -> Dict[str, Any]:
-        return {"success": True, "job_id": job_id, "status": "cancelled"}
+        try:
+            result = subprocess.run(
+                ["cancel", job_id],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if result.returncode == 0:
+                return {"success": True, "job_id": job_id, "status": "cancelled"}
+            else:
+                return {"success": False, "error": "Failed to cancel the print job"}
+        except subprocess.CalledProcessError as e:
+            return {"success": False, "error": f"Failed to cancel job: {e.stderr}"}
