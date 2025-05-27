@@ -8,11 +8,6 @@ import tempfile
 import os
 
 
-class Printer:
-    def __init__(self, printer_name: str):
-        self.printer_name = printer_name
-
-
 def register_tools(app: FastMCP) -> None:
     @app.tool(
         description="List all printers available on the system",
@@ -31,8 +26,7 @@ def register_tools(app: FastMCP) -> None:
                     match = re.match(r"printer (\S+)", line)
                     if match:
                         printer_name = match.group(1)
-                        printer = Printer(printer_name=printer_name)
-                        printers.append({"printer_name": printer.name})
+                        printers.append({"printer_name": printer_name})
         except subprocess.CalledProcessError:
             printers = []
         return printers

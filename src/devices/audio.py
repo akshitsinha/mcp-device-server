@@ -1,97 +1,198 @@
-from typing import Dict, List, Optional, Any
 from fastmcp import FastMCP
-
-
-class AudioDevice:
-    def __init__(self, device_id: str, name: str, is_input: bool):
-        self.device_id = device_id
-        self.name = name
-        self.is_input = is_input
+import pyaudio
+import wave
+from typing import Dict, List, Optional
+from pydantic import Field
+from typing import Annotated
+import tempfile
+import datetime
+import os
 
 
 def register_tools(app: FastMCP) -> None:
     @app.tool(
         name="list_audio_devices",
-        description="List all audio devices connected to the system",
+        description="List all available audio input and output devices",
+        tags=["audio"],
     )
-    async def list_audio_devices(
-        input_only: bool = False, output_only: bool = False
-    ) -> List[Dict[str, Any]]:
-        devices = []
+    def list_audio_devices() -> Dict[str, List[Dict[str, any]]]:
+        p = pyaudio.PyAudio()
 
-        if not output_only:
-            devices.extend(
-                [
-                    {
-                        "device_id": "mic0",
-                        "name": "Built-in Microphone",
-                        "type": "input",
-                    },
-                    {"device_id": "mic1", "name": "USB Microphone", "type": "input"},
-                ]
+        try:
+            input_devices = []
+            output_devices = []
+
+            for i in range(p.get_device_count()):
+                device_info = p.get_device_info_by_index(i)
+                device_data = {
+                    "index": i,
+                    "name": device_info["name"],
+                    "max_input_channels": device_info["maxInputChannels"],
+                    "max_output_channels": device_info["maxOutputChannels"],
+                    "default_sample_rate": device_info["defaultSampleRate"],
+                    "host_api": p.get_host_api_info_by_index(device_info["hostApi"])[
+                        "name"
+                    ],
+                }
+
+                if device_info["maxInputChannels"] > 0:
+                    input_devices.append(device_data)
+
+                if device_info["maxOutputChannels"] > 0:
+                    output_devices.append(device_data)
+
+            return {"input_devices": input_devices, "output_devices": output_devices}
+        finally:
+            p.terminate()
+
+    @app.tool(
+        name="record_audio",
+        description="Record audio from the microphone and save to a file",
+        tags=["audio"],
+    )
+    def record_audio(
+        duration: Annotated[
+            float, Field(default=5.0, description="Recording duration in seconds")
+        ],
+        sample_rate: Annotated[
+            Optional[int], Field(default=44100, description="Sample rate in Hz")
+        ] = 44100,
+        channels: Annotated[
+            Optional[int], Field(default=1, description="Number of audio channels")
+        ] = 1,
+        output_file: Annotated[
+            Optional[str], Field(description="Output file path for the recorded audio")
+        ] = None,
+        device_index: Annotated[
+            Optional[int],
+            Field(
+                default=None, description="Audio input device index (None for default)"
+            ),
+        ] = None,
+    ) -> Dict[str, any]:
+        chunk = 1024
+        format = pyaudio.paInt16
+
+        if output_file is None:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"recording_{timestamp}.wav"
+            output_file = os.path.join(tempfile.gettempdir(), filename)
+
+        p = pyaudio.PyAudio()
+
+        try:
+            device_info = None
+            if device_index is not None:
+                device_info = p.get_device_info_by_index(device_index)
+                if device_info["maxInputChannels"] == 0:
+                    return {
+                        "success": False,
+                        "error": f"Device {device_index} is not an input device",
+                    }
+
+            stream = p.open(
+                format=format,
+                channels=channels,
+                rate=sample_rate,
+                input=True,
+                frames_per_buffer=chunk,
+                input_device_index=device_index,
             )
 
-        if not input_only:
-            devices.extend(
-                [
-                    {
-                        "device_id": "spk0",
-                        "name": "Built-in Speakers",
-                        "type": "output",
-                    },
-                    {
-                        "device_id": "spk1",
-                        "name": "HDMI Audio Output",
-                        "type": "output",
-                    },
-                ]
-            )
+            frames = []
+            total_frames = int(sample_rate / chunk * duration)
 
-        return devices
+            for i in range(total_frames):
+                data = stream.read(chunk)
+                frames.append(data)
 
-    @app.tool(name="record_audio", description="Record audio from an input device")
-    async def record_audio(
-        device_id: str,
-        duration: Optional[int] = None,
-        save_path: Optional[str] = None,
-        format: str = "mp3",
-        quality: str = "medium",
-    ) -> Dict[str, Any]:
-        return {
-            "success": True,
-            "recording_id": "audio123456",
-            "device_id": device_id,
-            "file_path": save_path or f"/tmp/mcp-peripherals/audio_recording.{format}",
-            "start_time": "2025-05-23T12:34:56",
-            "format": format,
-            "quality": quality,
-            "max_duration": duration or "unlimited",
-        }
+            stream.stop_stream()
+            stream.close()
 
-    @app.tool(name="stop_audio_recording", description="Stop recording audio")
-    async def stop_audio_recording(recording_id: str) -> Dict[str, Any]:
-        return {
-            "success": True,
-            "recording_id": recording_id,
-            "file_path": "/tmp/mcp-peripherals/audio_recording.mp3",
-            "duration": "00:02:34",
-            "file_size": "3.2 MB",
-        }
+            with wave.open(output_file, "wb") as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(p.get_sample_size(format))
+                wf.setframerate(sample_rate)
+                wf.writeframes(b"".join(frames))
 
-    @app.tool(name="play_audio", description="Play audio through an output device")
-    async def play_audio(
-        device_id: str, file_path: str, volume: Optional[int] = 100, loop: bool = False
-    ) -> Dict[str, Any]:
-        return {
-            "success": True,
-            "playback_id": "play123456",
-            "device_id": device_id,
-            "file_path": file_path,
-            "duration": "00:03:45",
-            "volume": volume,
-            "loop": loop,
-        }
+            return {
+                "success": True,
+                "output_file": output_file,
+                "duration": duration,
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "device_used": device_info["name"] if device_info else "Default device",
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        finally:
+            p.terminate()
 
-    @app.tool(name="stop_audio_playback", description="Stop playing audio")
-    async def stop_audio_playback(playback_id: str) -> Dict[str, Any]:
-        return {"success": True, "playback_id": playback_id, "status": "stopped"}
+    @app.tool(
+        name="play_audio",
+        description="Play an audio file through the specified output device",
+        tags=["audio"],
+    )
+    def play_audio(
+        file_path: Annotated[str, Field(description="Path to the audio file to play")],
+        device_index: Annotated[
+            Optional[int],
+            Field(
+                default=None, description="Audio output device index (None for default)"
+            ),
+        ] = None,
+    ) -> Dict[str, any]:
+        try:
+            with wave.open(file_path, "rb") as wf:
+                channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                sample_rate = wf.getframerate()
+                frames = wf.getnframes()
+                duration = frames / sample_rate
+
+                p = pyaudio.PyAudio()
+
+                try:
+                    device_info = None
+                    if device_index is not None:
+                        device_info = p.get_device_info_by_index(device_index)
+                        if device_info["maxOutputChannels"] == 0:
+                            return {
+                                "success": False,
+                                "error": f"Device {device_index} is not an output device",
+                            }
+
+                    stream = p.open(
+                        format=p.get_format_from_width(sample_width),
+                        channels=channels,
+                        rate=sample_rate,
+                        output=True,
+                        output_device_index=device_index,
+                    )
+
+                    chunk = 1024
+                    data = wf.readframes(chunk)
+
+                    while data:
+                        stream.write(data)
+                        data = wf.readframes(chunk)
+
+                    stream.stop_stream()
+                    stream.close()
+
+                    return {
+                        "success": True,
+                        "file_played": file_path,
+                        "duration": duration,
+                        "sample_rate": sample_rate,
+                        "channels": channels,
+                        "device_used": device_info["name"]
+                        if device_info
+                        else "Default device",
+                    }
+                finally:
+                    p.terminate()
+        except FileNotFoundError:
+            return {"success": False, "error": f"Audio file not found: {file_path}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}

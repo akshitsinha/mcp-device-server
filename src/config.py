@@ -11,14 +11,8 @@ class Settings(BaseSettings):
         default=True, description="Enable printer functionality"
     )
     enable_audio: bool = Field(default=True, description="Enable audio functionality")
-    enable_storage: bool = Field(
-        default=True, description="Enable storage device functionality"
-    )
     enable_screen: bool = Field(
         default=True, description="Enable screen capture functionality"
-    )
-    enable_usb: bool = Field(
-        default=True, description="Enable USB device functionality"
     )
 
     model_config = {
