@@ -5,6 +5,7 @@ from pydantic import Field
 import subprocess
 import re
 import tempfile
+import os
 
 
 class Printer:
@@ -102,6 +103,42 @@ def register_tools(app: FastMCP) -> None:
                 return {"success": False, "error": f"Printing failed: {e.stderr}"}
             finally:
                 temp_file.close()
+
+    @app.tool(
+        name="print_as_pdf",
+        description="Print a file as PDF to a specified device location",
+        tags=["printer"],
+    )
+    async def print_as_pdf(
+        file_data: Annotated[
+            bytes, Field(description="Binary data of the PDF file to be saved")
+        ],
+        file_format: Annotated[str, Field(description="File format (must be 'pdf')")],
+        output_path: Annotated[
+            str, Field(description="Full path where the PDF should be saved")
+        ],
+    ) -> Dict[str, Any]:
+        if file_format.lower() != "pdf":
+            return {"success": False, "error": "File format must be 'pdf'"}
+
+        try:
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+            with open(output_path, "wb") as pdf_file:
+                pdf_file.write(file_data)
+
+            return {
+                "success": True,
+                "output_path": output_path,
+                "file_size": len(file_data),
+            }
+
+        except OSError as e:
+            return {"success": False, "error": f"Failed to save PDF: {str(e)}"}
+        except Exception as e:
+            return {"success": False, "error": f"Unexpected error: {str(e)}"}
 
     @app.tool(
         name="get_print_job",

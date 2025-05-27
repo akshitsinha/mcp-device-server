@@ -6,4 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=2.4.0",
+    "mss>=10.0.0",
+    "python-ffmpeg>=2.0.12",
+    "screeninfo>=0.8.1",
 ]

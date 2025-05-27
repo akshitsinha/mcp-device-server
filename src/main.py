@@ -1,5 +1,6 @@
 from server import create_app
 from config import get_settings
+import asyncio
 
 
 def main():
@@ -9,4 +10,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
