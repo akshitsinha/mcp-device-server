@@ -1,15 +1,17 @@
 from typing import Dict, List, Optional, Any
-from fastmcp import FastMCP
 from screeninfo import get_monitors
 from datetime import datetime
+from typing import Annotated
+from fastmcp import FastMCP
+from pydantic import Field
 from mss import mss
 import tempfile
 import os
-import time
-from typing import Annotated
-from pydantic import Field
-from ffmpeg.asyncio import FFmpeg
-import shutil
+import platform
+import subprocess
+import asyncio
+
+_active_screen_recording = None
 
 
 def register_tools(app: FastMCP) -> None:
@@ -69,7 +71,15 @@ def register_tools(app: FastMCP) -> None:
 
             monitors = get_monitors()
             if not monitors:
-                return {"success": False, "error": "No displays found"}
+                system = platform.system()
+                error_msg = "No displays found."
+                if system == "Linux":
+                    error_msg += " On Linux, ensure X11 or Wayland is running and display permissions are granted."
+                elif system == "Windows":
+                    error_msg += " Ensure display drivers are properly installed."
+                elif system == "Darwin":
+                    error_msg += " Check macOS display permissions in System Preferences > Security & Privacy > Privacy > Screen Recording."
+                return {"success": False, "error": error_msg}
 
             if display_index >= len(monitors):
                 return {
@@ -77,33 +87,54 @@ def register_tools(app: FastMCP) -> None:
                     "error": f"Display {device_id} not found. Available displays: 0-{len(monitors) - 1}",
                 }
 
-            with mss() as sct:
-                if save_path is None:
-                    temp_dir = tempfile.gettempdir()
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    save_path = os.path.join(temp_dir, f"screenshot_{timestamp}.png")
-                else:
-                    if (
-                        os.path.isdir(save_path)
-                        or save_path.endswith("/")
-                        or save_path.endswith("\\")
-                    ):
+            try:
+                with mss() as sct:
+                    if save_path is None:
+                        temp_dir = tempfile.gettempdir()
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         save_path = os.path.join(
-                            save_path, f"screenshot_{timestamp}.png"
+                            temp_dir, f"screenshot_{timestamp}.png"
                         )
                     else:
-                        if not os.path.splitext(save_path)[1]:
-                            save_path = save_path + ".png"
+                        if (
+                            os.path.isdir(save_path)
+                            or save_path.endswith("/")
+                            or save_path.endswith("\\")
+                        ):
+                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                            save_path = os.path.join(
+                                save_path, f"screenshot_{timestamp}.png"
+                            )
+                        else:
+                            if not os.path.splitext(save_path)[1]:
+                                save_path = save_path + ".png"
 
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                        dir_path = os.path.dirname(save_path)
+                        if dir_path:
+                            os.makedirs(dir_path, exist_ok=True)
 
-                sct.shot(mon=display_index + 1, output=save_path)
-                return {
-                    "success": True,
-                    "file_path": save_path,
-                }
+                    sct.shot(mon=display_index + 1, output=save_path)
 
+                    if not os.path.exists(save_path):
+                        return {
+                            "success": False,
+                            "error": "Screenshot file was not created",
+                        }
+
+                    return {
+                        "success": True,
+                        "file_path": save_path,
+                        "file_size": os.path.getsize(save_path),
+                    }
+
+            except PermissionError as e:
+                system = platform.system()
+                error_msg = f"Permission denied: {str(e)}."
+                if system == "Darwin":
+                    error_msg += " Grant screen recording permissions in System Preferences > Security & Privacy > Privacy > Screen Recording."
+                elif system == "Linux":
+                    error_msg += " Check X11/Wayland permissions or run with appropriate privileges."
+                return {"success": False, "error": error_msg}
         except Exception as e:
             return {"success": False, "error": f"Screenshot capture failed: {str(e)}"}
 
@@ -127,10 +158,10 @@ def register_tools(app: FastMCP) -> None:
         duration: Annotated[
             Optional[int],
             Field(
-                description="Duration of the recording in seconds. If None, defaults to 10 seconds",
-                default=10,
+                description="Duration of the recording in seconds. If -1, records in background until stop_record_screen is called. If None, defaults to 5 seconds",
+                default=5,
             ),
-        ] = 10,
+        ] = 5,
         fps: Annotated[
             Optional[float],
             Field(
@@ -139,7 +170,28 @@ def register_tools(app: FastMCP) -> None:
             ),
         ] = 15.0,
     ) -> Dict[str, Any]:
+        global _active_screen_recording
+
         try:
+            if _active_screen_recording is not None:
+                return {
+                    "success": False,
+                    "error": "Another screen recording is already in progress. Stop it first using stop_record_screen.",
+                }
+
+            if duration is not None and duration != -1 and duration <= 0:
+                return {
+                    "success": False,
+                    "error": "Duration must be positive or -1 for background recording",
+                }
+            if fps and fps <= 0:
+                return {"success": False, "error": "FPS must be positive"}
+            if fps and fps > 60:
+                return {
+                    "success": False,
+                    "error": "FPS should not exceed 60 for optimal performance",
+                }
+
             display_index = 0
             if device_id and device_id.startswith("display"):
                 try:
@@ -152,7 +204,15 @@ def register_tools(app: FastMCP) -> None:
 
             monitors = get_monitors()
             if not monitors:
-                return {"success": False, "error": "No displays found"}
+                system = platform.system()
+                error_msg = "No displays found."
+                if system == "Linux":
+                    error_msg += " On Linux, ensure X11 or Wayland is running and display permissions are granted."
+                elif system == "Windows":
+                    error_msg += " Ensure display drivers are properly installed."
+                elif system == "Darwin":
+                    error_msg += " Check macOS display permissions in System Preferences > Security & Privacy > Privacy > Screen Recording."
+                return {"success": False, "error": error_msg}
 
             if display_index >= len(monitors):
                 return {
@@ -178,32 +238,227 @@ def register_tools(app: FastMCP) -> None:
                     if not os.path.splitext(save_path)[1]:
                         save_path = save_path + ".mp4"
 
-                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                dir_path = os.path.dirname(save_path)
+                if dir_path:
+                    os.makedirs(dir_path, exist_ok=True)
 
-            frames_dir = tempfile.mkdtemp()
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-version"], capture_output=True, text=True, timeout=10
+                )
+                if result.returncode != 0:
+                    raise FileNotFoundError("FFmpeg not found or not working")
+            except (
+                subprocess.TimeoutExpired,
+                subprocess.CalledProcessError,
+                FileNotFoundError,
+            ):
+                system = platform.system()
+                install_commands = {
+                    "Windows": "winget install ffmpeg  OR  download from https://ffmpeg.org/",
+                    "Darwin": "brew install ffmpeg",
+                    "Linux": "sudo apt install ffmpeg  OR  sudo yum install ffmpeg",
+                }
+                return {
+                    "success": False,
+                    "error": f"Screen recording requires FFmpeg. Install it using: {install_commands.get(system, 'ffmpeg')}",
+                }
 
-            with mss() as sct:
-                start_time = time.time()
-                frame_count = 0
+            system = platform.system()
 
-                while time.time() - start_time < duration:
-                    sct.shot(
-                        mon=display_index + 1,
-                        output=f"{frames_dir}/frame_{frame_count:06d}.png",
+            if system == "Windows":
+                ffmpeg_args = [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "ddagrab",
+                    "-framerate",
+                    str(fps),
+                    "-i",
+                    f"desktop:0:{display_index}",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-threads",
+                    "2",
+                ]
+            elif system == "Darwin":
+                ffmpeg_args = [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "avfoundation",
+                    "-framerate",
+                    str(fps),
+                    "-pixel_format",
+                    "bgr0",
+                    "-i",
+                    f"Capture screen {display_index}",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "ultrafast",
+                    "-crf",
+                    "28",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-threads",
+                    "2",
+                ]
+            else:
+                ffmpeg_args = [
+                    "ffmpeg",
+                    "-y",
+                    "-f",
+                    "x11grab",
+                    "-framerate",
+                    str(fps),
+                    "-i",
+                    f":0.{display_index}",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+
+            if duration != -1:
+                ffmpeg_args.extend(["-t", str(duration)])
+
+            ffmpeg_args.append(save_path)
+
+            if duration == -1:
+                proc = subprocess.Popen(
+                    ffmpeg_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+                _active_screen_recording = {
+                    "process": proc,
+                    "file_path": save_path,
+                    "device_id": device_id,
+                    "start_time": datetime.now(),
+                }
+
+                await asyncio.sleep(0.5)
+
+                if proc.poll() is not None:
+                    _active_screen_recording = None
+                    try:
+                        stdout, stderr = proc.communicate()
+                        error_msg = stderr.decode() if stderr else "Unknown error"
+                        return {
+                            "success": False,
+                            "error": f"Recording failed to start: {error_msg}",
+                        }
+                    except Exception as e:
+                        return {
+                            "success": False,
+                            "error": "Recording failed to start: " + str(e),
+                        }
+
+                return {
+                    "success": True,
+                    "file_path": save_path,
+                    "status": "recording_started",
+                    "message": "Background recording started. Use stop_record_screen to stop.",
+                }
+
+            result = subprocess.run(ffmpeg_args, capture_output=True, text=True)
+
+            if result.returncode != 0:
+                error_details = result.stderr
+                if "Permission denied" in error_details:
+                    if system == "Darwin":
+                        error_details += "\nGrant screen recording permissions in System Preferences > Security & Privacy > Privacy > Screen Recording."
+                    elif system == "Linux":
+                        error_details += "\nCheck X11/Wayland permissions or run with appropriate privileges."
+                elif "No such file or directory" in error_details:
+                    error_details += (
+                        "\nEnsure FFmpeg is properly installed and accessible in PATH."
                     )
+                elif "Invalid data found" in error_details:
+                    error_details += "\nDisplay format may not be supported. Try a different display or check driver compatibility."
 
-                    frame_count += 1
+                return {
+                    "success": False,
+                    "error": f"FFmpeg recording failed: {error_details}",
+                }
 
-            ffmpeg = (
-                FFmpeg()
-                .option("y")
-                .input(f"{frames_dir}/frame_%06d.png", framerate=fps)
-                .output(save_path, vcodec="libx264", pix_fmt="yuv420p")
-            )
+            if not os.path.exists(save_path) or os.path.getsize(save_path) == 0:
+                return {
+                    "success": False,
+                    "error": "Video file was not created or is empty",
+                }
 
-            await ffmpeg.execute()
-            shutil.rmtree(frames_dir)
-            return {"success": True, "file_path": save_path}
-
+            return {
+                "success": True,
+                "file_path": save_path,
+            }
+        except PermissionError as e:
+            system = platform.system()
+            error_msg = f"Permission denied: {str(e)}."
+            if system == "Darwin":
+                error_msg += " Grant screen recording permissions in System Preferences > Security & Privacy > Privacy > Screen Recording."
+            elif system == "Linux":
+                error_msg += (
+                    " Check X11/Wayland permissions or run with appropriate privileges."
+                )
+            return {"success": False, "error": error_msg}
         except Exception as e:
             return {"success": False, "error": f"Screen recording failed: {str(e)}"}
+
+    @app.tool(
+        name="stop_record_screen",
+        description="Stop the current background screen recording",
+        tags=["screen"],
+    )
+    async def stop_record_screen() -> Dict[str, Any]:
+        global _active_screen_recording
+
+        if _active_screen_recording is None:
+            return {"success": False, "error": "No active screen recording found"}
+
+        try:
+            process = _active_screen_recording["process"]
+            file_path = _active_screen_recording["file_path"]
+            device_id = _active_screen_recording["device_id"]
+            start_time = _active_screen_recording["start_time"]
+
+            process.terminate()
+
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+            _active_screen_recording = None
+
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                duration = (datetime.now() - start_time).total_seconds()
+                return {
+                    "success": True,
+                    "file_path": file_path,
+                    "device_id": device_id,
+                    "duration": f"{duration:.1f} seconds",
+                    "file_size": os.path.getsize(file_path),
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "Recording was stopped but no valid file was created",
+                }
+
+        except Exception as e:
+            _active_screen_recording = None
+            return {
+                "success": False,
+                "error": f"Error stopping screen recording: {str(e)}",
+            }

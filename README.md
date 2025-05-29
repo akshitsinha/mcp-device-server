@@ -1,4 +1,4 @@
-# MCP Device Server
+# Peripheral Devices MCP Server
 
 A Model Context Protocol (MCP) server for seamless integration with peripheral devices connected to your computer. Control, monitor, and manage hardware devices through a unified API.
 
@@ -33,24 +33,31 @@ uv sync
 3. **Run the server**:
 
    **Option A: Run directly**:
+
    ```bash
    uv run src/main.py
    ```
 
    **Option B: Use with Claude Desktop**:
-   
+
    Add the following configuration to your `claude_desktop_config.json`:
+
    ```json
    {
      "mcpServers": {
        "mcp-device-server": {
          "command": "uv",
-         "args": ["--directory", "/path/to/mcp-device-server", "run", "src/main.py"]
+         "args": [
+           "--directory",
+           "/path/to/mcp-device-server",
+           "run",
+           "src/main.py"
+         ]
        }
      }
    }
    ```
-   
+
    Then restart Claude Desktop to load the server.
 
 ## Configuration
@@ -78,32 +85,34 @@ MCP_ENABLE_SCREEN=true    # Enable screen functionality
 | `get_camera_info`       | Get detailed camera information |
 | `capture_image`         | Take a picture from a camera    |
 | `start_video_recording` | Begin video recording           |
+| `stop_video_recording`  | Stop video recording            |
 
 ### Printer
 
-| Tool                 | Description                |
-| -------------------- | -------------------------- |
-| `list_printers`      | List available printers    |
-| `print_file`         | Send a file to a printer   |
-| `print_as_pdf`       | Print file as PDF          |
-| `get_print_job`      | Get print job information  |
-| `cancel_print_job`   | Cancel a print job         |
+| Tool               | Description               |
+| ------------------ | ------------------------- |
+| `list_printers`    | List available printers   |
+| `print_file`       | Send a file to a printer  |
+| `print_as_pdf`     | Print file as PDF         |
+| `get_print_job`    | Get print job information |
+| `cancel_print_job` | Cancel a print job        |
 
 ### Audio
 
-| Tool                   | Description                         |
-| ---------------------- | ----------------------------------- |
-| `list_audio_devices`   | List all audio input/output devices |
-| `record_audio`         | Record from an input device         |
-| `play_audio`           | Play audio through a device         |
+| Tool                 | Description                         |
+| -------------------- | ----------------------------------- |
+| `list_audio_devices` | List all audio input/output devices |
+| `record_audio`       | Record from an input device         |
+| `play_audio`         | Play audio through a device         |
 
 ### Screen
 
-| Tool                    | Description             |
-| ----------------------- | ----------------------- |
-| `list_displays`         | List connected displays |
-| `capture_screenshot`    | Take a screenshot       |
-| `record_screen`         | Start screen recording  |
+| Tool                 | Description             |
+| -------------------- | ----------------------- |
+| `list_displays`      | List connected displays |
+| `capture_screenshot` | Take a screenshot       |
+| `record_screen`      | Start screen recording  |
+| `stop_record_screen` | Stop screen recording   |
 
 ## License
 

@@ -1,12 +1,13 @@
+from typing import Dict, List, Optional
+from typing import Annotated
 from fastmcp import FastMCP
+from pydantic import Field
 import pyaudio
 import wave
-from typing import Dict, List, Optional
-from pydantic import Field
-from typing import Annotated
 import tempfile
 import datetime
 import os
+import platform
 
 
 def register_tools(app: FastMCP) -> None:
@@ -16,34 +17,53 @@ def register_tools(app: FastMCP) -> None:
         tags=["audio"],
     )
     async def list_audio_devices() -> Dict[str, List[Dict[str, any]]]:
-        p = pyaudio.PyAudio()
+        try:
+            p = pyaudio.PyAudio()
+        except Exception as e:
+            return {
+                "input_devices": [],
+                "output_devices": [],
+                "error": f"Failed to initialize audio system: {str(e)}. "
+                f"On {platform.system()}, ensure audio drivers are installed and permissions are granted.",
+            }
 
         try:
             input_devices = []
             output_devices = []
 
             for i in range(p.get_device_count()):
-                device_info = p.get_device_info_by_index(i)
-                device_data = {
-                    "index": i,
-                    "name": device_info["name"],
-                    "max_input_channels": device_info["maxInputChannels"],
-                    "max_output_channels": device_info["maxOutputChannels"],
-                    "default_sample_rate": device_info["defaultSampleRate"],
-                    "host_api": p.get_host_api_info_by_index(device_info["hostApi"])[
-                        "name"
-                    ],
-                }
+                try:
+                    device_info = p.get_device_info_by_index(i)
+                    device_data = {
+                        "name": device_info["name"],
+                        "max_input_channels": device_info["maxInputChannels"],
+                        "max_output_channels": device_info["maxOutputChannels"],
+                        "default_sample_rate": device_info["defaultSampleRate"],
+                        "host_api": p.get_host_api_info_by_index(
+                            device_info["hostApi"]
+                        )["name"],
+                    }
 
-                if device_info["maxInputChannels"] > 0:
-                    input_devices.append(device_data)
+                    if device_info["maxInputChannels"] > 0:
+                        input_devices.append(device_data)
 
-                if device_info["maxOutputChannels"] > 0:
-                    output_devices.append(device_data)
+                    if device_info["maxOutputChannels"] > 0:
+                        output_devices.append(device_data)
+                except Exception:
+                    continue
 
             return {"input_devices": input_devices, "output_devices": output_devices}
+        except Exception as e:
+            return {
+                "input_devices": [],
+                "output_devices": [],
+                "error": f"Error listing devices: {str(e)}",
+            }
         finally:
-            p.terminate()
+            try:
+                p.terminate()
+            except Exception:
+                pass
 
     @app.tool(
         name="record_audio",
@@ -78,7 +98,17 @@ def register_tools(app: FastMCP) -> None:
             filename = f"recording_{timestamp}.wav"
             output_file = os.path.join(tempfile.gettempdir(), filename)
 
-        p = pyaudio.PyAudio()
+        try:
+            p = pyaudio.PyAudio()
+        except Exception as e:
+            error_msg = f"Failed to initialize audio system: {str(e)}"
+            if platform.system() == "Darwin":
+                error_msg += " On macOS, check microphone permissions in System Preferences > Security & Privacy > Privacy > Microphone"
+            elif platform.system() == "Linux":
+                error_msg += " On Linux, ensure ALSA or PulseAudio is running and user has audio group permissions"
+            elif platform.system() == "Windows":
+                error_msg += " On Windows, ensure audio drivers are installed and microphone is not in use by another application"
+            return {"success": False, "error": error_msg}
 
         try:
             device_info = None
@@ -89,15 +119,30 @@ def register_tools(app: FastMCP) -> None:
                         "success": False,
                         "error": f"Device {device_index} is not an input device",
                     }
+            else:
+                device_index = p.get_default_input_device_info()["index"]
+                device_info = p.get_default_input_device_info()
 
-            stream = p.open(
-                format=format,
-                channels=channels,
-                rate=sample_rate,
-                input=True,
-                frames_per_buffer=chunk,
-                input_device_index=device_index,
-            )
+            try:
+                stream = p.open(
+                    format=format,
+                    channels=channels,
+                    rate=sample_rate,
+                    input=True,
+                    frames_per_buffer=chunk,
+                    input_device_index=device_index,
+                )
+            except Exception as e:
+                error_msg = f"Failed to open audio stream: {str(e)}"
+                if "Invalid device" in str(e):
+                    error_msg += f" Device index {device_index} may not exist or may not support the requested format."
+                elif "Device unavailable" in str(e) or "busy" in str(e).lower():
+                    error_msg += (
+                        " Audio device is currently in use by another application."
+                    )
+                elif platform.system() == "Linux" and "ALSA" in str(e):
+                    error_msg += " ALSA error - try different sample rate or check audio system configuration."
+                return {"success": False, "error": error_msg}
 
             frames = []
             total_frames = int(sample_rate / chunk * duration)
@@ -150,7 +195,17 @@ def register_tools(app: FastMCP) -> None:
                 frames = wf.getnframes()
                 duration = frames / sample_rate
 
-                p = pyaudio.PyAudio()
+                try:
+                    p = pyaudio.PyAudio()
+                except Exception as e:
+                    error_msg = f"Failed to initialize audio system: {str(e)}"
+                    if platform.system() == "Darwin":
+                        error_msg += " On macOS, check audio output permissions and ensure no other app is using exclusive access"
+                    elif platform.system() == "Linux":
+                        error_msg += " On Linux, ensure ALSA or PulseAudio is running"
+                    elif platform.system() == "Windows":
+                        error_msg += " On Windows, ensure audio drivers are installed"
+                    return {"success": False, "error": error_msg}
 
                 try:
                     device_info = None
@@ -161,14 +216,27 @@ def register_tools(app: FastMCP) -> None:
                                 "success": False,
                                 "error": f"Device {device_index} is not an output device",
                             }
+                    else:
+                        device_index = p.get_default_output_device_info()["index"]
+                        device_info = p.get_default_output_device_info()
 
-                    stream = p.open(
-                        format=p.get_format_from_width(sample_width),
-                        channels=channels,
-                        rate=sample_rate,
-                        output=True,
-                        output_device_index=device_index,
-                    )
+                    try:
+                        stream = p.open(
+                            format=p.get_format_from_width(sample_width),
+                            channels=channels,
+                            rate=sample_rate,
+                            output=True,
+                            output_device_index=device_index,
+                        )
+                    except Exception as e:
+                        error_msg = f"Failed to open audio output stream: {str(e)}"
+                        if "Invalid device" in str(e):
+                            error_msg += f" Device index {device_index} may not exist or may not support playback."
+                        elif "Device unavailable" in str(e) or "busy" in str(e).lower():
+                            error_msg += " Audio device is currently in use by another application."
+                        elif platform.system() == "Linux" and "ALSA" in str(e):
+                            error_msg += " ALSA error - try different sample rate or check audio system configuration."
+                        return {"success": False, "error": error_msg}
 
                     chunk = 1024
                     data = wf.readframes(chunk)
@@ -193,6 +261,24 @@ def register_tools(app: FastMCP) -> None:
                 finally:
                     p.terminate()
         except FileNotFoundError:
-            return {"success": False, "error": f"Audio file not found: {file_path}"}
+            return {
+                "success": False,
+                "error": f"Audio file not found: {file_path}. Check the file path and ensure it exists.",
+            }
+        except wave.Error as e:
+            return {
+                "success": False,
+                "error": f"Invalid WAV file format: {str(e)}. Ensure the file is a valid WAV audio file.",
+            }
+        except PermissionError:
+            return {
+                "success": False,
+                "error": f"Permission denied accessing file: {file_path}. Check file permissions.",
+            }
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            error_msg = f"Playback failed: {str(e)}"
+            if platform.system() == "Windows" and "DirectSound" in str(e):
+                error_msg += " Try updating your audio drivers or using a different audio device."
+            elif platform.system() == "Darwin" and "CoreAudio" in str(e):
+                error_msg += " Check macOS audio settings and ensure the device is not in exclusive mode."
+            return {"success": False, "error": error_msg}
