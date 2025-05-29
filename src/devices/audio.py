@@ -15,7 +15,7 @@ def register_tools(app: FastMCP) -> None:
         description="List all available audio input and output devices",
         tags=["audio"],
     )
-    def list_audio_devices() -> Dict[str, List[Dict[str, any]]]:
+    async def list_audio_devices() -> Dict[str, List[Dict[str, any]]]:
         p = pyaudio.PyAudio()
 
         try:
@@ -50,7 +50,7 @@ def register_tools(app: FastMCP) -> None:
         description="Record audio from the microphone and save to a file",
         tags=["audio"],
     )
-    def record_audio(
+    async def record_audio(
         duration: Annotated[
             float, Field(default=5.0, description="Recording duration in seconds")
         ],
@@ -133,7 +133,7 @@ def register_tools(app: FastMCP) -> None:
         description="Play an audio file through the specified output device",
         tags=["audio"],
     )
-    def play_audio(
+    async def play_audio(
         file_path: Annotated[str, Field(description="Path to the audio file to play")],
         device_index: Annotated[
             Optional[int],
