@@ -1,13 +1,16 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from typing import Annotated
 from fastmcp import FastMCP
 from pydantic import Field
-import pyaudio
-import wave
+import threading
+import platform
 import tempfile
 import datetime
+import pyaudio
+import wave
 import os
-import platform
+
+_active_audio_recording = None
 
 
 def register_tools(app: FastMCP) -> None:
@@ -16,7 +19,7 @@ def register_tools(app: FastMCP) -> None:
         description="List all available audio input and output devices",
         tags=["audio"],
     )
-    async def list_audio_devices() -> Dict[str, List[Dict[str, any]]]:
+    async def list_audio_devices() -> Dict[str, List[Dict[str, Any]]]:
         try:
             p = pyaudio.PyAudio()
         except Exception as e:
@@ -72,8 +75,12 @@ def register_tools(app: FastMCP) -> None:
     )
     async def record_audio(
         duration: Annotated[
-            float, Field(default=5.0, description="Recording duration in seconds")
-        ],
+            float,
+            Field(
+                default=5.0,
+                description="Recording duration in seconds. Pass -1 for background recording",
+            ),
+        ] = 5.0,
         sample_rate: Annotated[
             Optional[int], Field(default=44100, description="Sample rate in Hz")
         ] = 44100,
@@ -89,7 +96,21 @@ def register_tools(app: FastMCP) -> None:
                 default=None, description="Audio input device index (None for default)"
             ),
         ] = None,
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
+        global _active_audio_recording
+
+        if _active_audio_recording is not None:
+            return {
+                "success": False,
+                "error": "Another audio recording is already in progress. Stop it first using stop_record_audio.",
+            }
+
+        if duration != -1 and duration <= 0:
+            return {
+                "success": False,
+                "error": "Duration must be positive or -1 for background recording",
+            }
+
         chunk = 1024
         format = pyaudio.paInt16
 
@@ -144,6 +165,48 @@ def register_tools(app: FastMCP) -> None:
                     error_msg += " ALSA error - try different sample rate or check audio system configuration."
                 return {"success": False, "error": error_msg}
 
+            if duration == -1:
+                frames = []
+                stop_event = threading.Event()
+
+                def background_record():
+                    try:
+                        while not stop_event.is_set():
+                            data = stream.read(chunk, exception_on_overflow=False)
+                            frames.append(data)
+                    except Exception:
+                        pass
+
+                record_thread = threading.Thread(target=background_record)
+                record_thread.daemon = True
+                record_thread.start()
+
+                _active_audio_recording = {
+                    "stream": stream,
+                    "pyaudio": p,
+                    "frames": frames,
+                    "stop_event": stop_event,
+                    "thread": record_thread,
+                    "output_file": output_file,
+                    "sample_rate": sample_rate,
+                    "channels": channels,
+                    "format": format,
+                    "device_info": device_info,
+                    "start_time": datetime.datetime.now(),
+                }
+
+                return {
+                    "success": True,
+                    "output_file": output_file,
+                    "sample_rate": sample_rate,
+                    "channels": channels,
+                    "device_used": device_info["name"]
+                    if device_info
+                    else "Default device",
+                    "recording_status": "started",
+                    "message": "Background recording started. Use stop_record_audio to stop.",
+                }
+
             frames = []
             total_frames = int(sample_rate / chunk * duration)
 
@@ -171,7 +234,8 @@ def register_tools(app: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": str(e)}
         finally:
-            p.terminate()
+            if duration != -1:
+                p.terminate()
 
     @app.tool(
         name="play_audio",
@@ -186,7 +250,7 @@ def register_tools(app: FastMCP) -> None:
                 default=None, description="Audio output device index (None for default)"
             ),
         ] = None,
-    ) -> Dict[str, any]:
+    ) -> Dict[str, Any]:
         try:
             with wave.open(file_path, "rb") as wf:
                 channels = wf.getnchannels()
@@ -238,15 +302,22 @@ def register_tools(app: FastMCP) -> None:
                             error_msg += " ALSA error - try different sample rate or check audio system configuration."
                         return {"success": False, "error": error_msg}
 
-                    chunk = 1024
-                    data = wf.readframes(chunk)
+                    def play_in_background():
+                        try:
+                            with wave.open(file_path, "rb") as wf_bg:
+                                chunk = 1024
+                                data = wf_bg.readframes(chunk)
+                                while data:
+                                    stream.write(data)
+                                    data = wf_bg.readframes(chunk)
+                        finally:
+                            stream.stop_stream()
+                            stream.close()
+                            p.terminate()
 
-                    while data:
-                        stream.write(data)
-                        data = wf.readframes(chunk)
-
-                    stream.stop_stream()
-                    stream.close()
+                    play_thread = threading.Thread(target=play_in_background)
+                    play_thread.daemon = True
+                    play_thread.start()
 
                     return {
                         "success": True,
@@ -257,9 +328,12 @@ def register_tools(app: FastMCP) -> None:
                         "device_used": device_info["name"]
                         if device_info
                         else "Default device",
+                        "status": "playing",
+                        "message": f"Audio playback started in background. Duration: {duration:.2f} seconds",
                     }
-                finally:
+                except Exception as e:
                     p.terminate()
+                    raise e
         except FileNotFoundError:
             return {
                 "success": False,
@@ -282,3 +356,65 @@ def register_tools(app: FastMCP) -> None:
             elif platform.system() == "Darwin" and "CoreAudio" in str(e):
                 error_msg += " Check macOS audio settings and ensure the device is not in exclusive mode."
             return {"success": False, "error": error_msg}
+
+    @app.tool(
+        name="stop_record_audio",
+        description="Stop the current background audio recording",
+        tags=["audio"],
+    )
+    async def stop_record_audio() -> Dict[str, Any]:
+        global _active_audio_recording
+
+        if _active_audio_recording is None:
+            return {"success": False, "error": "No active audio recording found"}
+
+        try:
+            recording = _active_audio_recording
+            recording["stop_event"].set()
+            recording["thread"].join(timeout=5.0)
+            recording["stream"].stop_stream()
+            recording["stream"].close()
+
+            start_time = recording["start_time"]
+            duration = (datetime.datetime.now() - start_time).total_seconds()
+
+            output_file = recording["output_file"]
+            try:
+                with wave.open(output_file, "wb") as wf:
+                    wf.setnchannels(recording["channels"])
+                    wf.setsampwidth(
+                        recording["pyaudio"].get_sample_size(recording["format"])
+                    )
+                    wf.setframerate(recording["sample_rate"])
+                    wf.writeframes(b"".join(recording["frames"]))
+
+                recording["pyaudio"].terminate()
+                _active_audio_recording = None
+
+                if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
+                    return {
+                        "success": True,
+                        "output_file": output_file,
+                        "duration": duration,
+                        "sample_rate": recording["sample_rate"],
+                        "channels": recording["channels"],
+                        "device_used": recording["device_info"]["name"]
+                        if recording["device_info"]
+                        else "Default device",
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "error": "Recording was stopped but no valid file was created",
+                    }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "error": f"Failed to save audio file: {str(e)}",
+                }
+        except Exception as e:
+            _active_audio_recording = None
+            return {
+                "success": False,
+                "error": f"Error stopping audio recording: {str(e)}",
+            }

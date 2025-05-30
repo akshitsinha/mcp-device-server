@@ -8,8 +8,6 @@ import os
 import tempfile
 import asyncio
 import platform
-import logging
-import glob
 import subprocess
 
 _active_video_recording = None
@@ -24,61 +22,64 @@ def register_tools(app: FastMCP) -> None:
     async def list_cameras() -> List[Dict[str, str]]:
         cameras = []
         found_cameras = set()
-        system = platform.system().lower()
 
-        try:
-            if system == "linux":
-                video_devices = glob.glob("/dev/video*")
-                for device_path in sorted(video_devices):
+        for i in range(10):
+            if i in found_cameras:
+                continue
+
+            cap = None
+            try:
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        cameras.append(
+                            {
+                                "device_id": f"cam{i}",
+                                "name": f"Camera {i}",
+                                "backend": cap.getBackendName(),
+                            }
+                        )
+                        found_cameras.add(i)
+                        cap.release()
+                        continue
+                cap.release()
+
+                backends = [cv2.CAP_ANY]
+                system = platform.system().lower()
+
+                if system == "windows":
+                    backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF] + backends
+                elif system == "darwin":
+                    backends = [cv2.CAP_AVFOUNDATION] + backends
+                elif system == "linux":
+                    backends = [cv2.CAP_V4L2, cv2.CAP_GSTREAMER] + backends
+
+                for backend in backends:
                     try:
-                        device_num = int(device_path.split("video")[-1])
-                        if device_num not in found_cameras:
-                            cap = cv2.VideoCapture(device_num)
-                            if cap.isOpened():
+                        cap = cv2.VideoCapture(i, backend)
+                        if cap.isOpened():
+                            ret, frame = cap.read()
+                            if ret and frame is not None:
                                 cameras.append(
                                     {
-                                        "device_id": f"cam{device_num}",
-                                        "name": f"Camera {device_num}",
-                                        "device_path": device_path,
+                                        "device_id": f"cam{i}",
+                                        "name": f"Camera {i}",
+                                        "backend": cap.getBackendName(),
                                     }
                                 )
-                                found_cameras.add(device_num)
-                                cap.release()
-                    except (ValueError, Exception):
-                        continue
-            else:
-                backends = []
-                if system == "windows":
-                    backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
-                elif system == "darwin":
-                    backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
-                else:
-                    backends = [cv2.CAP_ANY]
-
-                for i in range(10):
-                    if i in found_cameras:
-                        continue
-
-                    for backend in backends:
-                        try:
-                            cap = cv2.VideoCapture(i, backend)
-                            if cap.isOpened():
-                                ret, frame = cap.read()
-                                if ret and frame is not None:
-                                    cameras.append(
-                                        {
-                                            "device_id": f"cam{i}",
-                                            "name": f"Camera {i}",
-                                            "backend": cap.getBackendName(),
-                                        }
-                                    )
-                                    found_cameras.add(i)
+                                found_cameras.add(i)
                                 cap.release()
                                 break
-                        except Exception:
-                            continue
-        except Exception as e:
-            logging.error(f"Error discovering cameras: {e}")
+                        cap.release()
+                    except Exception:
+                        if cap:
+                            cap.release()
+                        continue
+            except Exception:
+                if cap:
+                    cap.release()
+                continue
 
         return cameras
 
@@ -182,10 +183,10 @@ def register_tools(app: FastMCP) -> None:
         timer: Annotated[
             int,
             Field(
-                default=1,
-                description="Optional timer in seconds to wait before capturing the image. If None, captures in 1 second.",
+                default=0,
+                description="Optional timer in seconds to wait before capturing the image. If None, captures immediately.",
             ),
-        ] = 1,
+        ] = 0,
         save_path: Annotated[
             Optional[str],
             Field(
@@ -256,10 +257,8 @@ def register_tools(app: FastMCP) -> None:
                 save_path = os.path.join(save_path, f"camera_capture_{timestamp}.jpg")
 
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, 95]
             success = cv2.imwrite(save_path, frame, encode_params)
-
             if not success:
                 return {
                     "status": "error",
@@ -272,7 +271,6 @@ def register_tools(app: FastMCP) -> None:
                 "device_id": device_id,
                 "file_path": save_path,
             }
-
         except Exception as e:
             return {"status": "error", "device_id": device_id, "error": str(e)}
         finally:
@@ -302,10 +300,10 @@ def register_tools(app: FastMCP) -> None:
         timer: Annotated[
             int,
             Field(
-                default=1,
-                description="Optional timer in seconds to wait before starting recording.",
+                default=0,
+                description="Optional timer in seconds to wait before starting recording. If None, starts immediately.",
             ),
-        ] = 1,
+        ] = 0,
         fps: Annotated[
             float,
             Field(
@@ -344,12 +342,47 @@ def register_tools(app: FastMCP) -> None:
             if fps <= 0:
                 return {"status": "error", "error": "FPS must be positive"}
 
-            # Validate FPS for different systems
             system = platform.system().lower()
             if system == "darwin" and fps > 30:
                 return {
                     "status": "error",
                     "error": "FPS cannot exceed 30 for macOS cameras. Use fps=30 or lower.",
+                }
+
+            cap = None
+            width, height = None, None
+            backends = []
+            if system == "windows":
+                backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+            elif system == "linux":
+                backends = [cv2.CAP_V4L2, cv2.CAP_GSTREAMER, cv2.CAP_ANY]
+            elif system == "darwin":
+                backends = [cv2.CAP_AVFOUNDATION, cv2.CAP_ANY]
+            else:
+                backends = [cv2.CAP_ANY]
+
+            for backend in backends:
+                try:
+                    cap = cv2.VideoCapture(cam_index, backend)
+                    if cap.isOpened():
+                        ret, frame = cap.read()
+                        if ret and frame is not None:
+                            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            cap.release()
+                            break
+                        cap.release()
+                        cap = None
+                except Exception:
+                    if cap:
+                        cap.release()
+                        cap = None
+                    continue
+
+            if width is None or height is None:
+                return {
+                    "status": "error",
+                    "error": "Could not determine camera resolution",
                 }
 
             if save_path is None:
@@ -363,7 +396,28 @@ def register_tools(app: FastMCP) -> None:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
             await asyncio.sleep(timer)
-            system = platform.system().lower()
+
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-version"], capture_output=True, text=True, timeout=10
+                )
+                if result.returncode != 0:
+                    raise FileNotFoundError("FFmpeg not found or not working")
+            except (
+                subprocess.TimeoutExpired,
+                subprocess.CalledProcessError,
+                FileNotFoundError,
+            ):
+                system = platform.system()
+                install_commands = {
+                    "Windows": "winget install ffmpeg  OR  download from https://ffmpeg.org/",
+                    "Darwin": "brew install ffmpeg",
+                    "Linux": "sudo apt install ffmpeg  OR  sudo yum install ffmpeg",
+                }
+                return {
+                    "success": False,
+                    "error": f"Screen recording requires FFmpeg. Install it using: {install_commands.get(system, 'ffmpeg')}",
+                }
 
             ffmpeg_args = ["ffmpeg", "-y"]
 
@@ -374,6 +428,8 @@ def register_tools(app: FastMCP) -> None:
                         "dshow",
                         "-framerate",
                         str(fps),
+                        "-video_size",
+                        f"{width}x{height}",
                         "-i",
                         f"video=@device_pv_{cam_index}",
                     ]
@@ -385,6 +441,8 @@ def register_tools(app: FastMCP) -> None:
                         "v4l2",
                         "-framerate",
                         str(fps),
+                        "-video_size",
+                        f"{width}x{height}",
                         "-i",
                         f"/dev/video{cam_index}",
                     ]
@@ -396,6 +454,8 @@ def register_tools(app: FastMCP) -> None:
                         "avfoundation",
                         "-framerate",
                         str(fps),
+                        "-video_size",
+                        f"{width}x{height}",
                         "-pixel_format",
                         "uyvy422",
                         "-i",
@@ -403,7 +463,16 @@ def register_tools(app: FastMCP) -> None:
                     ]
                 )
             else:
-                ffmpeg_args.extend(["-framerate", str(fps), "-i", str(cam_index)])
+                ffmpeg_args.extend(
+                    [
+                        "-framerate",
+                        str(fps),
+                        "-video_size",
+                        f"{width}x{height}",
+                        "-i",
+                        str(cam_index),
+                    ]
+                )
 
             ffmpeg_args.extend(
                 [
@@ -414,7 +483,7 @@ def register_tools(app: FastMCP) -> None:
                     "-crf",
                     "23",
                     "-preset",
-                    "medium",
+                    "superfast" if duration == -1 else "fast",
                 ]
             )
 
@@ -457,6 +526,7 @@ def register_tools(app: FastMCP) -> None:
                     "device_id": device_id,
                     "file_path": save_path,
                     "recording_status": "started",
+                    "resolution": f"{width}x{height}",
                     "message": "Background recording started. Use stop_video_recording to stop.",
                 }
 
@@ -480,6 +550,7 @@ def register_tools(app: FastMCP) -> None:
                 "status": "success",
                 "device_id": device_id,
                 "file_path": save_path,
+                "resolution": f"{width}x{height}",
             }
         except Exception as e:
             if save_path and os.path.exists(save_path):

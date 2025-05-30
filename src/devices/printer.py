@@ -2,7 +2,7 @@ from typing import Dict, List, Any
 from fastmcp import FastMCP
 from typing import Annotated
 from pydantic import Field
-from time import time
+from datetime import datetime
 import platform
 import subprocess
 import tempfile
@@ -256,7 +256,7 @@ def register_tools(app: FastMCP) -> None:
 
         try:
             if os.path.isdir(output_path):
-                timestamp = int(time())
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"document_{timestamp}.pdf"
                 full_output_path = os.path.join(output_path, filename)
             else:

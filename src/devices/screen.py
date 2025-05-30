@@ -1,15 +1,17 @@
 from typing import Dict, List, Optional, Any
 from screeninfo import get_monitors
+from fastmcp import FastMCP, Image
+from PIL import Image as PILImage
 from datetime import datetime
 from typing import Annotated
-from fastmcp import FastMCP
 from pydantic import Field
 from mss import mss
-import tempfile
-import os
-import platform
 import subprocess
+import platform
+import tempfile
 import asyncio
+import os
+import io
 
 _active_screen_recording = None
 
@@ -45,7 +47,7 @@ def register_tools(app: FastMCP) -> None:
     )
     async def capture_screenshot(
         device_id: Annotated[
-            Optional[str],
+            str,
             Field(
                 description="The display identifier in format 'displayN' where N is the display index (e.g., 'display0', 'display1')",
                 default="display0",
@@ -54,9 +56,16 @@ def register_tools(app: FastMCP) -> None:
         save_path: Annotated[
             Optional[str],
             Field(
-                description="The file path with file name where the screenshot should be saved. If None, a temporary file with timestamp will be created automatically"
+                description="The file path with filename where the screenshot should be saved. If None, a temporary file with timestamp will be created automatically"
             ),
         ] = None,
+        return_image: Annotated[
+            bool,
+            Field(
+                default=False,
+                description="Whether to return the screenshot only, managing to stay within MCP response limits.",
+            ),
+        ] = False,
     ) -> Dict[str, Any]:
         try:
             display_index = 0
@@ -121,12 +130,38 @@ def register_tools(app: FastMCP) -> None:
                             "error": "Screenshot file was not created",
                         }
 
-                    return {
+                    result = {
                         "success": True,
                         "file_path": save_path,
                         "file_size": os.path.getsize(save_path),
                     }
 
+                    if return_image:
+                        try:
+                            with PILImage.open(save_path) as img:
+                                max_size = 512
+                                original_width, original_height = img.size
+
+                                scale_factor = min(
+                                    max_size / original_width,
+                                    max_size / original_height,
+                                )
+                                new_width = int(original_width * scale_factor)
+                                new_height = int(original_height * scale_factor)
+
+                                img = img.resize(
+                                    (new_width, new_height), PILImage.Resampling.LANCZOS
+                                )
+
+                                img_bytes = io.BytesIO()
+                                img.save(img_bytes, format="PNG", optimize=True)
+                                img_bytes.seek(0)
+
+                                return Image(data=img_bytes.getvalue(), format="png")
+                        except Exception as e:
+                            result["image_error"] = f"Failed to create image: {str(e)}"
+
+                    return result
             except PermissionError as e:
                 system = platform.system()
                 error_msg = f"Permission denied: {str(e)}."
@@ -145,10 +180,10 @@ def register_tools(app: FastMCP) -> None:
         device_id: Annotated[
             Optional[str],
             Field(
-                description="The display identifier in format 'displayN' where N is the display index (e.g., 'display0', 'display1')",
-                default="display0",
+                description="The display identifier which should be passed as input format to ffmpeg.",
+                default="0",
             ),
-        ] = "display0",
+        ] = "0",
         save_path: Annotated[
             Optional[str],
             Field(
@@ -158,10 +193,10 @@ def register_tools(app: FastMCP) -> None:
         duration: Annotated[
             Optional[int],
             Field(
-                description="Duration of the recording in seconds. If -1, records in background until stop_record_screen is called. If None, defaults to 5 seconds",
-                default=5,
+                description="Duration of the recording in seconds. If -1, records in background until stop_record_screen is called. If None, defaults to 3 seconds",
+                default=3,
             ),
-        ] = 5,
+        ] = 3,
         fps: Annotated[
             Optional[float],
             Field(
@@ -194,13 +229,7 @@ def register_tools(app: FastMCP) -> None:
 
             display_index = 0
             if device_id and device_id.startswith("display"):
-                try:
-                    display_index = int(device_id.replace("display", ""))
-                except ValueError:
-                    return {
-                        "success": False,
-                        "error": f"Invalid device_id format: {device_id}. Expected format: 'displayN'",
-                    }
+                display_index = int(device_id.replace("display", ""))
 
             monitors = get_monitors()
             if not monitors:
@@ -214,7 +243,7 @@ def register_tools(app: FastMCP) -> None:
                     error_msg += " Check macOS display permissions in System Preferences > Security & Privacy > Privacy > Screen Recording."
                 return {"success": False, "error": error_msg}
 
-            if display_index >= len(monitors):
+            if display_index >= len(monitors) or display_index < 0:
                 return {
                     "success": False,
                     "error": f"Display {device_id} not found. Available displays: 0-{len(monitors) - 1}",
@@ -265,7 +294,6 @@ def register_tools(app: FastMCP) -> None:
                 }
 
             system = platform.system()
-
             if system == "Windows":
                 ffmpeg_args = [
                     "ffmpeg",
@@ -275,11 +303,11 @@ def register_tools(app: FastMCP) -> None:
                     "-framerate",
                     str(fps),
                     "-i",
-                    f"desktop:0:{display_index}",
+                    f"\\\\.\\DISPLAY{display_index + 1}",
                     "-c:v",
                     "libx264",
                     "-preset",
-                    "fast",
+                    "ultrafast",
                     "-crf",
                     "23",
                     "-pix_fmt",
@@ -300,7 +328,7 @@ def register_tools(app: FastMCP) -> None:
                     "-i",
                     f"Capture screen {display_index}",
                     "-c:v",
-                    "libx264",
+                    "h264_videotoolbox",
                     "-preset",
                     "ultrafast",
                     "-crf",
@@ -319,11 +347,11 @@ def register_tools(app: FastMCP) -> None:
                     "-framerate",
                     str(fps),
                     "-i",
-                    f":0.{display_index}",
+                    f":{display_index}",
                     "-c:v",
                     "libx264",
                     "-preset",
-                    "fast",
+                    "ultrafast",
                     "-crf",
                     "23",
                     "-pix_fmt",
@@ -334,7 +362,6 @@ def register_tools(app: FastMCP) -> None:
                 ffmpeg_args.extend(["-t", str(duration)])
 
             ffmpeg_args.append(save_path)
-
             if duration == -1:
                 proc = subprocess.Popen(
                     ffmpeg_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -347,7 +374,6 @@ def register_tools(app: FastMCP) -> None:
                 }
 
                 await asyncio.sleep(0.5)
-
                 if proc.poll() is not None:
                     _active_screen_recording = None
                     try:
@@ -371,7 +397,6 @@ def register_tools(app: FastMCP) -> None:
                 }
 
             result = subprocess.run(ffmpeg_args, capture_output=True, text=True)
-
             if result.returncode != 0:
                 error_details = result.stderr
                 if "Permission denied" in error_details:
@@ -455,7 +480,6 @@ def register_tools(app: FastMCP) -> None:
                     "success": False,
                     "error": "Recording was stopped but no valid file was created",
                 }
-
         except Exception as e:
             _active_screen_recording = None
             return {
