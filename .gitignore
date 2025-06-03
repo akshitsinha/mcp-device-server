@@ -11,3 +11,6 @@ wheels/
 
 # Vscode
 .vscode/
+
+**/.DS_Store
+
